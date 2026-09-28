@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Echelon Overlay</string>
+    <string name="prototype_status">Echelon Overlay\nPrototype scaffold\nBike disconnected · Automatic control disabled</string>
+</resources>
