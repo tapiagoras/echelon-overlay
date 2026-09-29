@@ -12,9 +12,14 @@ contains GPL version 3. No QZ implementation or power lookup table is copied int
 this project. Reference downloads were kept outside this repository. No Android
 application files were changed and no bike commands were sent.
 
-**UNCERTAIN** means the inspected source does not establish the fact for an actual
-EX-5 / EX-5s, or supports only an inference. Confirmed QZ behavior is not automatically
-confirmed hardware behavior, especially on the EX-5s 22-inch console.
+Reviewed again on 2026-09-29 against the same pinned source. See
+[BLE Review](ble-review.md) for the verification matrix and implementation gate.
+
+**VERIFIED** means directly established behavior in the cited QZ source, not a
+physical-device test. **INFERRED** means a reasoned interpretation of that source.
+**UNCERTAIN** means evidence is insufficient for the actual EX-5 / EX-5s.
+Confirmed QZ behavior is not automatically confirmed hardware behavior, especially
+on the EX-5s 22-inch console.
 
 ## Main result and relevant files
 
@@ -28,6 +33,13 @@ compatibility are **UNCERTAIN**. Sources: `src/devices/bluetooth.cpp`,
 `bluetooth::deviceDiscovered()` [routing][discovery];
 `src/devices/echelonconnectsport/echelonconnectsport.h`, class
 `echelonconnectsport` [declaration][header].
+
+**VERIFIED:** earlier branches in `bluetooth::deviceDiscovered()` separately route
+`ECH-EC-SPT` to the stairclimber, `ECH-STRIDE` and other prefixes to the treadmill,
+and `ECH-ROW` and other prefixes to the rower. The generic `ECH` match is therefore
+a fallback, not a unique bike/model identifier. **INFERRED:** a matching EX-5s would
+use the fallback only if no earlier branch selects it. Source:
+`src/devices/bluetooth.cpp`, `bluetooth::deviceDiscovered()` [earlier branches][discovery-order].
 
 | File | Relevant class/functions | Why inspect it |
 | --- | --- | --- |
@@ -102,11 +114,24 @@ Every initialization write uses `writeCharacteristic(..., wait_for_response=true
 That helper waits for **any** service `characteristicChanged` event or a 300 ms
 timeout; it does not correlate response opcode, payload, or success. Otherwise
 it waits for `characteristicWritten` or the same timeout. It invokes Qt's write
-method without an explicit write-mode argument. The driver has no negotiated
-write-mode selection here; actual EX-5s properties should be captured. `btinit()`
+method without an explicit write-mode argument. **VERIFIED:** Qt 5.15 defines that
+argument's default as `WriteWithResponse`; this is transport-level write response,
+not a matched Echelon command reply or physical actuation confirmation. The QZ
+helper's `wait_for_response` flag changes which signal it waits for, not the GATT
+write mode. The driver has no negotiated write-mode selection here; actual EX-5s
+properties should be captured. `btinit()`
 does not require a validated acknowledgment before setting `initDone`.
 Source: driver `echelonconnectsport::writeCharacteristic()` [write helper][write],
-`btinit()` [init][init].
+`btinit()` [init][init]; [Qt write API][qt-write].
+
+**VERIFIED:** the two CCCD requests are issued in order, notify 1 then notify 2.
+Qt documents FIFO serialization, so consecutive calls are not evidence of
+concurrent on-air descriptor writes. QZ's callback does not gate initialization
+on both completions, and emits discovery readiness before `btinit()` completes.
+**INFERRED:** a later descriptor callback can schedule another initialization
+pass, depending on event ordering. Source: driver `stateChanged()`,
+`descriptorWritten()`, `update()` [subscription][subscribe], [callback][descriptor],
+[update][update]; [Qt service interaction][qt-write].
 
 After initialization, `update()` periodically calls `sendPoll()`, sending
 `F0 A0 01 N C`, where `N` starts at 1, increments through 255, and wraps to 1;
@@ -197,6 +222,8 @@ Source: driver `wattsFromResistance()` [source][power].
 The real parser accepts exactly five bytes beginning `F0 D2`, takes byte 3 as the
 resistance level, updates `Resistance`, and emits `resistanceRead`. It does not
 check byte 2, the final checksum, or the allowed resistance range here. The
+assignment does not explicitly cast byte 3 to unsigned, unlike cadence; malformed
+high-bit values must not be treated as valid levels in a future parser. The
 virtual writer constructs `F0 D2 01 R C`, with additive checksum modulo 256.
 Sources: driver `characteristicChanged()` [real parser][telemetry];
 `virtualbike::echelonWriteResistance()` [virtual writer][virtual-telemetry].
@@ -224,8 +251,11 @@ notification/timeout helper, with no command-specific success result or actuatio
 verification. Sources: driver `update()` [source][update], `forceResistance()`
 [source][command], `writeCharacteristic()` [source][write]; class constants [header][header].
 
-The inspected `update()` stop branch clears a request but sends no physical stop
-command. The normal resistance dispatch branch has no explicit `noWriteResistance`
+**VERIFIED:** the inspected `update()` stop branch clears only `requestStop`, not
+pending resistance or requested power, and sends no physical stop command.
+Resistance processing occurs before that stop branch. **INFERRED:** this branch
+alone cannot prevent a resistance write in the same update or stop later ERG
+recalculation. The normal resistance dispatch branch has no explicit `noWriteResistance`
 guard, despite the constructor retaining that flag and passing it to virtual-device
 construction. This flag alone is not evidence of a fail-safe transport interlock.
 **UNCERTAIN:** supported motorized control on the particular EX-5s, acceptable
@@ -285,9 +315,14 @@ resistance retention, connection exclusivity, and disconnect watchdog behavior.
 
 These are project recommendations, not claims from QZ: capture the actual bike's
 advertised name, firmware, service/characteristic properties, and notification
-channels; collect read-only packet traces while changing cadence and resistance
+channels; collect notification-only packet traces while changing cadence and resistance
 manually; validate frame lengths, checksums, distance units, initial/stale readings,
-and reconnect behavior. Only after a separate control-safety review should a
+and reconnect behavior. Enabling notifications writes CCCDs; it is not literally
+a zero-write test. Do not send the A1/A3/B0 initialization, A0 polls, unlock traffic,
+or B1 resistance commands in the first subscription-only test. Their presence in
+QZ does not establish harmlessness or necessity on this EX-5s. If no telemetry
+arrives, record that result and stop; use the staged test in [BLE Review](ble-review.md).
+Only after a separate control-safety review should a
 supervised write experiment verify motor response and acknowledgments. Do not
 reuse QZ's lookup tables or assume its reconnect/timeout behavior is our policy.
 
@@ -312,3 +347,5 @@ reuse QZ's lookup tables or assume its reconnect/timeout behavior is our policy.
 [virtual-services]: https://github.com/cagnulein/qdomyos-zwift/blob/0bd17860cce73ee945f8717761c899e180e921f3/src/virtualdevices/virtualbike.cpp#L568-L599
 [virtual-replies]: https://github.com/cagnulein/qdomyos-zwift/blob/0bd17860cce73ee945f8717761c899e180e921f3/src/virtualdevices/virtualbike.cpp#L1599-L1720
 [virtual-telemetry]: https://github.com/cagnulein/qdomyos-zwift/blob/0bd17860cce73ee945f8717761c899e180e921f3/src/virtualdevices/virtualbike.cpp#L2229-L2307
+[discovery-order]: https://github.com/cagnulein/qdomyos-zwift/blob/0bd17860cce73ee945f8717761c899e180e921f3/src/devices/bluetooth.cpp#L2274-L2430
+[qt-write]: https://doc.qt.io/archives/qt-5.15/qlowenergyservice.html#writeCharacteristic
